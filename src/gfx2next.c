@@ -3387,51 +3387,24 @@ static void process_tiles()
 	}
 	else
 	{
+		uint16_t map_mask = (m_args.map_16bit ? 0x1ff : 0xff);
 		uint32_t map_width = m_image_width / (m_tile_width * m_block_width);
 		uint32_t map_height = m_image_height / (m_tile_height * m_block_height);
+		uint32_t map_size = map_width * map_height;
 	
-		if (m_args.tile_y)
+		for (uint32_t mi = 0; mi < map_size; ++mi)
 		{
-			for (int x = 0; x < map_width; x++)
+			int x = m_args.tile_y ? mi / map_height : mi % map_width;
+			int y = m_args.tile_y ? mi % map_height : mi / map_width;
+			if (m_block_width == 1 && m_block_height == 1)
 			{
-				for (int y = 0; y < map_height; y++)
-				{
-					if (m_block_width == 1 && m_block_height == 1)
-					{
-						uint8_t attributes = 0;
-						uint32_t ti = m_args.tile_offset + get_tile(x * m_tile_width, y * m_tile_height, &attributes);
-						uint16_t map_mask = (m_args.map_16bit ? 0x1ff : 0xff);
-						
-						m_map[x * map_height + y] = (ti & map_mask) | (attributes << 8);
-					}
-					else
-					{
-						uint32_t ti = get_block(x * m_tile_width * m_block_width, y * m_tile_height * m_block_height);
-						m_map[x * map_height + y] = ti;
-					}
-				}
+				uint8_t attributes = 0;
+				uint32_t ti = m_args.tile_offset + get_tile(x * m_tile_width, y * m_tile_height, &attributes);
+				m_map[mi] = (ti & map_mask) | (attributes << 8);
 			}
-		}
-		else
-		{
-			for (int y = 0; y < map_height; y++)
+			else
 			{
-				for (int x = 0; x < map_width; x++)
-				{
-					if (m_block_width == 1 && m_block_height == 1)
-					{
-						uint8_t attributes = 0;
-						uint32_t ti = m_args.tile_offset + get_tile(x * m_tile_width, y * m_tile_height, &attributes);
-						uint16_t map_mask = (m_args.map_16bit ? 0x1ff : 0xff);
-						
-						m_map[y * map_width + x] = (ti & map_mask) | (attributes << 8);
-					}
-					else
-					{
-						uint32_t ti = get_block(x * m_tile_width * m_block_width, y * m_tile_height * m_block_height);
-						m_map[y * map_width + x] = ti;
-					}
-				}
+				m_map[mi] = get_block(x * m_tile_width * m_block_width, y * m_tile_height * m_block_height);
 			}
 		}
 	}
