@@ -35,6 +35,8 @@ int _CRT_glob = 0;
 #include <glob.h>
 #include <ctype.h>
 #include <math.h>
+#include <string.h>
+#include <strings.h>
 #include <assert.h>
 #include "zx0.h"
 #include "lodepng.h"
