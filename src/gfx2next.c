@@ -3441,6 +3441,8 @@ static void process_tiles()
 		uint32_t map_height = m_image_height / (m_tile_height * m_block_height);
 		uint32_t map_size = map_width * map_height;
 		
+		if (MAP_SIZE < map_size) exit_with_msg("Map is bigger than %d tiles (%d x %d)!\n", MAP_SIZE, map_width, map_height);
+		
 		if (m_args.tile_focus_center)
 		{
 			tiles_focus_center(map_width, map_height); // pre-allocate all tiles going from center of image
@@ -3526,6 +3528,8 @@ static void parse_tile(char *line, int first_gid, int *tile_count)
 		
 		uint8_t attributes = tiled_flags_to_attributes(tile_id >> 28);
 
+		if (MAP_SIZE <= *tile_count) exit_with_msg("Tiled map is bigger than %d tiles!\n", MAP_SIZE);
+		
 		m_map[(*tile_count)++] = (tile_id & TILED_TILEID_MASK) | (attributes << 8);
 		
 		pch = strtok(NULL, ",\r\n");
