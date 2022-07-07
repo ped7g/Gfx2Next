@@ -3352,6 +3352,46 @@ static int get_block(int tbx, int tby)
 	return block_index;
 }
 
+static void tiles_focus_center(uint32_t map_width, uint32_t map_height)
+{
+	assert(m_args.tile_focus_center);
+	
+	if (!(m_args.tile_norepeat || m_args.tile_norotate || m_args.tile_nomirror))
+	{
+		exit_with_msg("Tile focus center requires also one of the tile norepeat/nomirror/norotate options!\n");
+	}
+	
+	if (1 != m_block_width || 1 != m_block_height)
+	{
+		printf("Warning tile focus center works only for 1x1 blocks\n");
+		return;
+	}
+	
+	// do a "dry run" of calling `get_tile` in outward spiral-like path to prioritise center
+	// so the center tiles have low tile-index and are less likely to be outside of 256/512 limit
+	// don't write m_map yet, that will be done by real run going in regular x/y-order-first way
+	uint8_t attributes;
+	uint32_t map_cx = map_width / 2, map_cy = map_height / 2;
+	uint32_t edge_x = 0, edge_y = 1;
+	
+	while (edge_x < map_cx && edge_y <= map_cy)
+	{
+		// widen (do new columns) until ratio edge_x/edge_y > image_w/image_h, then do new row
+		bool widen = (edge_x * map_cy <= edge_y * map_cx);
+		// do column/row going outward from center, mirroring coordinates in four quadrants (order: TL,BR,TR,BL)
+		for (int coordinate = 0; coordinate < (widen ? edge_y : edge_x); ++coordinate)
+		{
+			int x = widen ? edge_x : coordinate;
+			int y = widen ? coordinate : edge_y;
+			get_tile((map_cx - x - 1) * m_tile_width, (map_cy - y - 1) * m_tile_height, &attributes);
+			get_tile((map_cx + x)     * m_tile_width, (map_cy + y)     * m_tile_height, &attributes);
+			get_tile((map_cx + x)     * m_tile_width, (map_cy - y - 1) * m_tile_height, &attributes);
+			get_tile((map_cx - x - 1) * m_tile_width, (map_cy + y)     * m_tile_height, &attributes);
+		}
+		widen ? ++edge_x : ++edge_y;
+	}
+}
+
 static void process_tiles()
 {
 	if (m_args.bitmap)
@@ -3401,41 +3441,9 @@ static void process_tiles()
 		uint32_t map_height = m_image_height / (m_tile_height * m_block_height);
 		uint32_t map_size = map_width * map_height;
 		
-		if (m_args.tile_focus_center && 1 == m_block_width && 1 == m_block_height)
+		if (m_args.tile_focus_center)
 		{
-			
-			if (!(m_args.tile_norepeat || m_args.tile_norotate || m_args.tile_nomirror))
-			{
-				exit_with_msg("Tile focus center requires also one of the tile norepeat/nomirror/norotate options!\n");
-			}
-			
-			// do a "dry run" of calling `get_tile` in outward spiral-like path to prioritise center
-			// so the center tiles have low tile-index and are less likely to be outside of 256/512 limit
-			// don't write m_map yet, that will be done by real run going in regular x/y-order-first way
-			uint8_t attributes;
-			uint32_t map_cx = map_width / 2, map_cy = map_height / 2;
-			uint32_t edge_x = 0, edge_y = 1;
-			
-			while (edge_x < map_cx && edge_y <= map_cy)
-			{
-				// widen (do new columns) until ration edge_x/edge_y > image_w/image_h, then do new row
-				bool widen = (edge_x * map_cy <= edge_y * map_cx);
-				// do column/row going outward from center, mirroring coordinates in four quadrants (order: TL,BR,TR,BL)
-				for (int coordinate = 0; coordinate < (widen ? edge_y : edge_x); ++coordinate)
-				{
-					int x = widen ? edge_x : coordinate;
-					int y = widen ? coordinate : edge_y;
-					get_tile((map_cx - x - 1) * m_tile_width, (map_cy - y - 1) * m_tile_height, &attributes);
-					get_tile((map_cx + x)     * m_tile_width, (map_cy + y)     * m_tile_height, &attributes);
-					get_tile((map_cx + x)     * m_tile_width, (map_cy - y - 1) * m_tile_height, &attributes);
-					get_tile((map_cx - x - 1) * m_tile_width, (map_cy + y)     * m_tile_height, &attributes);
-				}
-				widen ? ++edge_x : ++edge_y;
-			}
-		}
-		else if (m_args.tile_focus_center)
-		{
-			printf("Warning tile focus center works only for 1x1 blocks\n");
+			tiles_focus_center(map_width, map_height); // pre-allocate all tiles going from center of image
 		}
 	
 		for (uint32_t mi = 0; mi < map_size; ++mi)
