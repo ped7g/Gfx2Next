@@ -270,6 +270,7 @@ typedef struct
 	bool tile_ldws;
 	int tile_offset;
 	bool tile_offset_auto;
+	uint32_t tile_max;
 	int tile_pal;
 	bool tile_pal_auto;
 	bool tile_none;
@@ -330,6 +331,7 @@ static arguments_t m_args  =
 	.tile_ldws = false,
 	.tile_offset = 0,
 	.tile_offset_auto = false,
+	.tile_max = 0,
 	.tile_pal = 0,
 	.tile_pal_auto = false,
 	.tile_none = false,
@@ -383,6 +385,7 @@ static uint8_t m_std_palette_index[NUM_PALETTE_COLORS] = { 0 };
 static uint8_t m_tiles[TILES_SIZE] = { 0 };
 static uint16_t m_map[MAP_SIZE] = { 0 };
 static uint16_t m_blocks[BLOCK_SIZE] = { 0 };
+static uint32_t* m_tile_merge = NULL;
 
 static uint8_t *m_image = NULL;
 static uint32_t m_image_width = 0;
@@ -429,6 +432,12 @@ static FILE *m_header_file = NULL;
 
 static void close_all(void)
 {
+	if (m_tile_merge != NULL)
+	{
+		free(m_tile_merge);
+		m_tile_merge = NULL;
+	}
+	
 	if (m_image != NULL)
 	{
 		free(m_image);
@@ -892,6 +901,7 @@ static void print_usage(void)
 	printf("  -tile-ldws              Get tile in Y order first for ldws instruction. (Default is X order first)\n");
 	printf("  -tile-offset=n          Sets the starting tile offset to n tiles\n");
 	printf("  -tile-offset-auto       Adds tile offset when using wildcards\n");
+	printf("  -tile-max=n             Merge similar tiles until n tiles remain (1bpp)\n");
 	printf("  -tile-pal=n             Sets the palette offset attribute to n\n");
 	printf("  -tile-pal-auto          Increments palette offset when using wildcards\n");
 	printf("  -tile-none              Don't save a tile file\n");
@@ -1051,6 +1061,10 @@ static bool parse_args(int argc, char *argv[], arguments_t *args)
 			else if (!strcmp(argv[i], "-tile-offset-auto"))
 			{
 				m_args.tile_offset_auto = true;
+			}
+			else if (!strncmp(argv[i], "-tile-max=", 10))
+			{
+				m_args.tile_max = atoi(&argv[i][10]);
 			}
 			else if (!strncmp(argv[i], "-tile-pal=", 10))
 			{
@@ -1518,6 +1532,16 @@ static bool is_valid_bmp_file(uint32_t *palette_offset,
 	}
 
 	return true;
+}
+
+static uint32_t get_tile_count_out()
+{
+	if (m_tile_merge) // merging was already processed, only tile_max tiles will be exported at most
+	{
+		if (m_args.tile_max < m_tile_count) return m_args.tile_max;
+	}
+	
+	return m_tile_count;
 }
 
 static void read_bitmap()
@@ -2633,7 +2657,7 @@ static void write_tiles_sprites()
 	char out_filename[256] = { 0 };
 	uint32_t tile_offset = 0;
 	uint32_t tile_size = (m_args.colors_4bit ? m_tile_size >> 1 : (m_args.colors_1bit ? m_tile_size >> 3 : m_tile_size));
-	uint32_t data_size = tile_size * m_tile_count;
+	uint32_t data_size = tile_size * get_tile_count_out();
 	const char *extension = (m_args.sprites ? EXT_SPR : EXT_NXT);
 	bool use_compression = m_args.compress &  (m_args.sprites ? COMPRESS_SPRITES : COMPRESS_TILES);
 
@@ -2715,7 +2739,7 @@ static void write_tiles_sprites()
 
 			create_filename(out_filename, m_args.out_filename, "_tileset_preview.png", false);
 
-			write_tiles_png(out_filename, m_tile_width, m_tile_height, 0, m_tile_count, m_args.tiled_width, &bitmap_width, &bitmap_height);
+			write_tiles_png(out_filename, m_tile_width, m_tile_height, 0, get_tile_count_out(), m_args.tiled_width, &bitmap_width, &bitmap_height);
 		}
 	}
 	
@@ -2779,7 +2803,7 @@ static void write_tiled_files(uint32_t image_width, uint32_t image_height, uint3
 	create_filename(tsx_filename, m_args.out_filename, EXT_TSX, false);
 	FILE *p_tmx_file = fopen(tmx_filename, "w");
 	
-	uint32_t tile_count = MIN(m_tile_count, m_args.map_16bit ? 512 : 256);
+	uint32_t tile_count = MIN(get_tile_count_out(), m_args.map_16bit ? 512 : 256);
 	uint32_t bitmap_width = 0, bitmap_height = 0;
 	
 	write_tiles_png(png_filename, tile_width, tile_height, 0, tile_count, m_args.tiled_width, &bitmap_width, &bitmap_height);
@@ -3115,7 +3139,7 @@ static match_t check_tile_rotate(int i)
 	return match;
 }
 
-static int get_tile(int tx, int ty, uint8_t *attributes)
+static uint32_t get_tile(int tx, int ty, uint8_t *attributes)
 {
 	if (m_args.debug)
 	{
@@ -3272,10 +3296,15 @@ static int get_tile(int tx, int ty, uint8_t *attributes)
 		m_tile_count++;
 	}
 	
+	if (m_tile_merge) // tile-merging mapping exists, transform full index to limited set
+	{
+		tile_index = m_tile_merge[tile_index];
+	}
+	
 	*attributes |= m_args.tile_pal << 4;
 	
 	if (m_args.debug)
-		printf("Tile Index = %04x, Tile Count = %d\n", tile_index, m_tile_count);
+		printf("Tile Index = %04x, Tile Count = %d (out = %d)\n", tile_index, m_tile_count, get_tile_count_out());
 	
 	return tile_index;
 }
@@ -3361,10 +3390,14 @@ static void tiles_focus_center(uint32_t map_width, uint32_t map_height)
 		exit_with_msg("Tile focus center requires also one of the tile norepeat/nomirror/norotate options!\n");
 	}
 	
+	if (1 & (map_width | map_height))
+	{
+		exit_with_msg("Tile focus center requires map width and height to be even numbers!\n");
+	}
+	
 	if (1 != m_block_width || 1 != m_block_height)
 	{
-		printf("Warning tile focus center works only for 1x1 blocks\n");
-		return;
+		exit_with_msg("Tile focus center works only for 1 x 1 blocks\n");
 	}
 	
 	// do a "dry run" of calling `get_tile` in outward spiral-like path to prioritise center
@@ -3389,6 +3422,62 @@ static void tiles_focus_center(uint32_t map_width, uint32_t map_height)
 			get_tile((map_cx - x - 1) * m_tile_width, (map_cy + y)     * m_tile_height, &attributes);
 		}
 		widen ? ++edge_x : ++edge_y;
+	}
+}
+
+static void merge_tiles()
+{
+	if (m_tile_count < m_args.tile_max)
+	{
+		if (0 == m_tile_count) exit_with_msg("No tiles to merge, use focus option to preprocess them early\n");
+		
+		return; // no merging needed, less than max tiles extracted
+	}
+	
+	if (!m_args.colors_1bit) exit_with_msg("Tile merging supports only 1bpp mode\n");
+	
+	uint32_t tile_byte_size = m_args.colors_4bit ? (m_tile_size >> 1) : m_args.colors_1bit ? (m_tile_size >> 3) : m_tile_size;
+	assert(8 == tile_byte_size); // only 1bpp support right now to keep heuristic most trivial
+	
+	assert(NULL == m_tile_merge);
+	m_tile_merge = malloc(sizeof(uint32_t) * m_tile_count);
+	printf("Merging %d tiles down to %d\n", m_tile_count, get_tile_count_out());
+	
+	uint32_t ti = 0;
+	
+	// 0..max-1 maps 1:1 to original tiles
+	for (; ti < m_args.tile_max; ++ti) m_tile_merge[ti] = ti;
+	
+	// max..N -> merge to something in 0..max-1 set
+	for (; ti < m_tile_count; ++ti)
+	{
+		uint32_t to_merge_ofs = ti * tile_byte_size;
+		
+		// look for least different tile in initial set
+		uint32_t best_fit = m_args.tiled_blank;
+		uint32_t best_diff_bytes = tile_byte_size;
+		uint32_t best_diff_pixels = m_tile_width * m_tile_height;
+		
+		for (uint32_t mi = 0; mi < m_args.tile_max; ++mi)
+		{
+			uint32_t diff_bytes = 0, diff_pixels = 0, mi_ofs = mi * tile_byte_size;
+			
+			for (uint32_t i = 0; i < tile_byte_size; ++i)
+			{
+				if (m_tiles[to_merge_ofs + i] == m_tiles[mi_ofs + i]) continue;
+				++diff_bytes;
+				diff_pixels += __builtin_popcount(m_tiles[to_merge_ofs + i] ^ m_tiles[mi_ofs + i]);
+			}
+			
+			if (diff_bytes < best_diff_bytes || diff_pixels + 2 * (diff_bytes - best_diff_bytes) < best_diff_pixels)
+			{
+				best_fit = mi;
+				best_diff_bytes = diff_bytes;
+				best_diff_pixels = diff_pixels;
+			}
+		}
+		
+		m_tile_merge[ti] = best_fit;
 	}
 }
 
@@ -3447,6 +3536,11 @@ static void process_tiles()
 		{
 			tiles_focus_center(map_width, map_height); // pre-allocate all tiles going from center of image
 		}
+		
+		if (m_args.tile_max)
+		{
+			merge_tiles();
+		}
 	
 		for (uint32_t mi = 0; mi < map_size; ++mi)
 		{
@@ -3467,12 +3561,12 @@ static void process_tiles()
 	
 	if (m_args.map_16bit)
 	{
-		if (m_tile_count > 512)
+		if (get_tile_count_out() > 512)
 			printf("Warning tile count > 512!\n");
 	}
 	else
 	{
-		if (m_tile_count > 256)
+		if (get_tile_count_out() > 256)
 			printf("Warning tile count > 256!\n");
 	}
 }
@@ -3887,7 +3981,7 @@ int process_file()
 			
 			printf("Tile Offset = %d\n", m_args.tile_offset);
 			printf("Tile Palette = %d\n", m_args.tile_pal);
-			printf("Tile Count = %d\n", m_tile_count);
+			printf("Tile Count = %d\n", get_tile_count_out());
 			
 			write_tiles_sprites();
 		}
