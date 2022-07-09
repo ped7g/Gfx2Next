@@ -373,6 +373,11 @@ static arguments_t m_args  =
 	.preview = false,
 };
 
+typedef struct
+{
+	uint32_t ti;
+} merge_info_t;
+
 static uint8_t m_bmp_header[BMP_HEADER_SIZE] = { 0 };
 
 static uint8_t m_palette[PALETTE_SIZE] = { 0 };
@@ -385,7 +390,7 @@ static uint8_t m_std_palette_index[NUM_PALETTE_COLORS] = { 0 };
 static uint8_t m_tiles[TILES_SIZE] = { 0 };
 static uint16_t m_map[MAP_SIZE] = { 0 };
 static uint16_t m_blocks[BLOCK_SIZE] = { 0 };
-static uint32_t* m_tile_merge = NULL;
+static merge_info_t* m_tile_merge = NULL;
 
 static uint8_t *m_image = NULL;
 static uint32_t m_image_width = 0;
@@ -3298,7 +3303,7 @@ static uint32_t get_tile(int tx, int ty, uint8_t *attributes)
 	
 	if (m_tile_merge) // tile-merging mapping exists, transform full index to limited set
 	{
-		tile_index = m_tile_merge[tile_index];
+		tile_index = m_tile_merge[tile_index].ti;
 	}
 	
 	*attributes |= m_args.tile_pal << 4;
@@ -3440,13 +3445,38 @@ static void merge_tiles()
 	assert(8 == tile_byte_size); // only 1bpp support right now to keep heuristic most trivial
 	
 	assert(NULL == m_tile_merge);
-	m_tile_merge = malloc(sizeof(uint32_t) * m_tile_count);
+	m_tile_merge = calloc(m_tile_count, sizeof(merge_info_t));
+	uint8_t* edge_masks = calloc(m_tile_count + 2, tile_byte_size); // allocate two more for temp buffers
+	if (NULL == m_tile_merge || NULL == edge_masks) exit_with_msg("Can't allocate memory for tile merge data.\n");
 	printf("Merging %d tiles down to %d\n", m_tile_count, get_tile_count_out());
+	
+	uint8_t* tile_temp1 = edge_masks + (m_tile_count * tile_byte_size); // temp buffer pointers
+	uint8_t* tile_temp2 = tile_temp1 + tile_byte_size;
+
+	// calculate edge-mask for all tiles
+	for (uint32_t ti = 0; ti < m_tile_count; ++ti)
+	{
+		uint32_t ti_ofs = ti * tile_byte_size;
+		for (uint32_t i = 0; i < tile_byte_size; ++i)
+		{
+			if (0 != i) edge_masks[ti_ofs + i] |= m_tiles[ti_ofs + i - 1] ^ m_tiles[ti_ofs + i];
+			if (tile_byte_size - 1 != i) edge_masks[ti_ofs + i] |= m_tiles[ti_ofs + i + 1] ^ m_tiles[ti_ofs + i];
+			edge_masks[ti_ofs + i] |= 0x7f & ((m_tiles[ti_ofs + i] >> 1) ^ m_tiles[ti_ofs + i]);
+			edge_masks[ti_ofs + i] |= 0xfe & ((m_tiles[ti_ofs + i] << 1) ^ m_tiles[ti_ofs + i]);
+		}
+	}
 	
 	uint32_t ti = 0;
 	
+	/*/
+	FIXME all
+	- go through all tiles, calculate edge mask
+	- go through O(N*N) to calculate diff stats for every tile, diff bytes, diff pixels in edge, diff pixels outside edge, count 1,2,<=4 edge-pixels diff, and best diff pixels
+	- go through diff stats and re-sort tiles a bit, swapping least sum-1-edge-pixel from beginning with worst-best-diff from end, some weight being on keeping low id tiles still early
+	- go through remaining excessive tiles looking for best fit in 0..max-1 tileset, like it was before
+	/*/
 	// 0..max-1 maps 1:1 to original tiles
-	for (; ti < m_args.tile_max; ++ti) m_tile_merge[ti] = ti;
+	for (; ti < m_args.tile_max; ++ti) m_tile_merge[ti].ti = ti;
 	
 	// max..N -> merge to something in 0..max-1 set
 	for (; ti < m_tile_count; ++ti)
@@ -3460,6 +3490,8 @@ static void merge_tiles()
 		
 		for (uint32_t mi = 0; mi < m_args.tile_max; ++mi)
 		{
+			if (ti == mi) continue;
+			
 			uint32_t diff_bytes = 0, diff_pixels = 0, mi_ofs = mi * tile_byte_size;
 			
 			for (uint32_t i = 0; i < tile_byte_size; ++i)
@@ -3477,8 +3509,10 @@ static void merge_tiles()
 			}
 		}
 		
-		m_tile_merge[ti] = best_fit;
+		m_tile_merge[ti].ti = best_fit;
 	}
+	
+	free(edge_masks);
 }
 
 static void process_tiles()
