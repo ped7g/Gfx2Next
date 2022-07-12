@@ -376,7 +376,15 @@ static arguments_t m_args  =
 typedef struct
 {
 	uint32_t ti;
+	uint32_t match_edge_1px, match_edge_2px, match_edge_4px, match_1px, match_other;
 } merge_info_t;
+
+typedef struct
+{
+	uint32_t edge_px_diff;
+	uint32_t other_px_diff;
+	uint32_t byte_diff;
+} match_info_t;
 
 static uint8_t m_bmp_header[BMP_HEADER_SIZE] = { 0 };
 
@@ -3430,6 +3438,68 @@ static void tiles_focus_center(uint32_t map_width, uint32_t map_height)
 	}
 }
 
+static void generate_edge_masks(uint8_t* edge_masks, uint32_t tile_byte_size)
+{
+	for (uint32_t ti = 0; ti < m_tile_count; ++ti)
+	{
+		uint32_t ti_ofs = ti * tile_byte_size;
+		for (uint32_t i = 0; i < tile_byte_size; ++i)
+		{
+			if (0 != i) edge_masks[ti_ofs + i] |= m_tiles[ti_ofs + i - 1] ^ m_tiles[ti_ofs + i];
+			if (tile_byte_size - 1 != i) edge_masks[ti_ofs + i] |= m_tiles[ti_ofs + i + 1] ^ m_tiles[ti_ofs + i];
+			edge_masks[ti_ofs + i] |= 0x7f & ((m_tiles[ti_ofs + i] >> 1) ^ m_tiles[ti_ofs + i]);
+			edge_masks[ti_ofs + i] |= 0xfe & ((m_tiles[ti_ofs + i] << 1) ^ m_tiles[ti_ofs + i]);
+		}
+	}
+}
+
+static void calculate_tile_match(uint32_t ti, uint32_t mi, uint32_t tile_byte_size, uint8_t* edge_masks, match_info_t* info)
+{
+	uint32_t ti_ofs = ti * tile_byte_size, mi_ofs = mi * tile_byte_size;
+	info->edge_px_diff = info->other_px_diff = info->byte_diff = 0;
+	
+	for (uint32_t i = 0; i < tile_byte_size; ++i)
+	{
+		if (m_tiles[ti_ofs + i] == m_tiles[mi_ofs + i]) continue;
+		++info->byte_diff;
+		uint8_t px_diff = m_tiles[ti_ofs + i] ^ m_tiles[mi_ofs + i];
+		uint8_t edge_px_diff = px_diff & edge_masks[ti_ofs + i] & edge_masks[mi_ofs + i];
+		info->edge_px_diff += __builtin_popcount(edge_px_diff);
+		info->other_px_diff += __builtin_popcount(px_diff ^ edge_px_diff);
+	}
+}
+
+static void calculate_diff_stats(uint32_t ti, uint32_t tile_byte_size, uint8_t* edge_masks)
+{
+	// go through all tiles to calculate diff stats for tile `ti`
+	match_info_t match_info;
+	assert( 0 == (m_tile_merge[ti].match_edge_1px | m_tile_merge[ti].match_edge_2px | m_tile_merge[ti].match_edge_4px | m_tile_merge[ti].match_1px | m_tile_merge[ti].match_other));
+
+	for (uint32_t mi = 0; mi < m_tile_count; ++mi)
+	{
+		if (ti == mi) continue;
+		calculate_tile_match(ti, mi, tile_byte_size, edge_masks, &match_info);
+		
+		if (1 == match_info.other_px_diff && 0 == match_info.edge_px_diff) ++m_tile_merge[ti].match_1px;
+		else if (0 < match_info.other_px_diff) ++m_tile_merge[ti].match_other;
+		else
+		{
+			assert(0 == match_info.other_px_diff);
+			if (1 == match_info.edge_px_diff) ++m_tile_merge[ti].match_edge_1px;
+			else if (2 == match_info.edge_px_diff) ++m_tile_merge[ti].match_edge_2px;
+			else if (4 <= match_info.edge_px_diff) ++m_tile_merge[ti].match_edge_4px;
+			else ++m_tile_merge[ti].match_other;
+		}
+	}
+}
+
+int tile_merge_comparator(const void* a, const void* b)
+{
+	const merge_info_t* aa = a, *bb = b;
+	if (aa->match_other == bb->match_other) return aa->ti - bb->ti;
+	return aa->match_other - bb->match_other;
+}
+
 static void merge_tiles()
 {
 	if (m_tile_count < m_args.tile_max)
@@ -3446,66 +3516,60 @@ static void merge_tiles()
 	
 	assert(NULL == m_tile_merge);
 	m_tile_merge = calloc(m_tile_count, sizeof(merge_info_t));
-	uint8_t* edge_masks = calloc(m_tile_count + 2, tile_byte_size); // allocate two more for temp buffers
+	uint8_t* edge_masks = calloc(m_tile_count, tile_byte_size);
 	if (NULL == m_tile_merge || NULL == edge_masks) exit_with_msg("Can't allocate memory for tile merge data.\n");
 	printf("Merging %d tiles down to %d\n", m_tile_count, get_tile_count_out());
 	
-	uint8_t* tile_temp1 = edge_masks + (m_tile_count * tile_byte_size); // temp buffer pointers
-	uint8_t* tile_temp2 = tile_temp1 + tile_byte_size;
-
-	// calculate edge-mask for all tiles
+	generate_edge_masks(edge_masks, tile_byte_size);
+	
+	// go through O(N*N) to calculate diff stats for every tile (after edge masks are ready)
 	for (uint32_t ti = 0; ti < m_tile_count; ++ti)
 	{
-		uint32_t ti_ofs = ti * tile_byte_size;
-		for (uint32_t i = 0; i < tile_byte_size; ++i)
-		{
-			if (0 != i) edge_masks[ti_ofs + i] |= m_tiles[ti_ofs + i - 1] ^ m_tiles[ti_ofs + i];
-			if (tile_byte_size - 1 != i) edge_masks[ti_ofs + i] |= m_tiles[ti_ofs + i + 1] ^ m_tiles[ti_ofs + i];
-			edge_masks[ti_ofs + i] |= 0x7f & ((m_tiles[ti_ofs + i] >> 1) ^ m_tiles[ti_ofs + i]);
-			edge_masks[ti_ofs + i] |= 0xfe & ((m_tiles[ti_ofs + i] << 1) ^ m_tiles[ti_ofs + i]);
-		}
+		m_tile_merge[ti].ti = ti;
+		calculate_diff_stats(ti, tile_byte_size, edge_masks);
+		// calculate final value of tile for qsort to reshuffle tiles later
+		// m_tile_merge[ti].match_other = ti; // "dump" version which works way too good
+		m_tile_merge[ti].match_other = ti + 16 * (m_tile_merge[ti].match_edge_1px ? 64 - m_tile_merge[ti].match_edge_1px : 0) + 8 * (m_tile_merge[ti].match_edge_2px ? 128 - m_tile_merge[ti].match_edge_2px : 0);
 	}
 	
-	uint32_t ti = 0;
+	// reshuffle tiles based on the heuristic score
+	qsort(m_tile_merge, m_tile_count, sizeof(merge_info_t), &tile_merge_comparator);
 	
-	/*/
-	FIXME all
-	- go through all tiles, calculate edge mask
-	- go through O(N*N) to calculate diff stats for every tile, diff bytes, diff pixels in edge, diff pixels outside edge, count 1,2,<=4 edge-pixels diff, and best diff pixels
-	- go through diff stats and re-sort tiles a bit, swapping least sum-1-edge-pixel from beginning with worst-best-diff from end, some weight being on keeping low id tiles still early
-	- go through remaining excessive tiles looking for best fit in 0..max-1 tileset, like it was before
-	/*/
-	// 0..max-1 maps 1:1 to original tiles
-	for (; ti < m_args.tile_max; ++ti) m_tile_merge[ti].ti = ti;
+	// reshuffle tile gfx data based on the heuristic score
+	uint8_t* tiles_copy = malloc(m_tile_count * tile_byte_size);
+	memcpy(tiles_copy, m_tiles, m_tile_count * tile_byte_size); // make full copy of current gfx tiles
+	// from copy reset main set in reshuffled order
+	for (uint32_t ti = 0; ti < m_tile_count; ++ti) memcpy(m_tiles + ti * tile_byte_size, tiles_copy + m_tile_merge[ti].ti * tile_byte_size, tile_byte_size);
+	free(tiles_copy);
+	
+	generate_edge_masks(edge_masks, tile_byte_size); // re-generate edge_masks after shuffle
+	
+	// 0..max-1 maps 1:1 to early tiles
+	for (uint32_t ti = 0; ti < m_args.tile_max; ++ti) m_tile_merge[ti].ti = ti;
 	
 	// max..N -> merge to something in 0..max-1 set
-	for (; ti < m_tile_count; ++ti)
+	for (uint32_t ti = m_args.tile_max; ti < m_tile_count; ++ti)
 	{
+		match_info_t match_info;
 		uint32_t to_merge_ofs = ti * tile_byte_size;
 		
 		// look for least different tile in initial set
 		uint32_t best_fit = m_args.tiled_blank;
-		uint32_t best_diff_bytes = tile_byte_size;
-		uint32_t best_diff_pixels = m_tile_width * m_tile_height;
+		uint32_t best_other_px_diff = m_tile_width * m_tile_height;
+		uint32_t best_edge_px_diff = m_tile_width * m_tile_height;
 		
 		for (uint32_t mi = 0; mi < m_args.tile_max; ++mi)
 		{
 			if (ti == mi) continue;
 			
-			uint32_t diff_bytes = 0, diff_pixels = 0, mi_ofs = mi * tile_byte_size;
+			calculate_tile_match(ti, mi, tile_byte_size, edge_masks, &match_info);
 			
-			for (uint32_t i = 0; i < tile_byte_size; ++i)
-			{
-				if (m_tiles[to_merge_ofs + i] == m_tiles[mi_ofs + i]) continue;
-				++diff_bytes;
-				diff_pixels += __builtin_popcount(m_tiles[to_merge_ofs + i] ^ m_tiles[mi_ofs + i]);
-			}
-			
-			if (diff_bytes < best_diff_bytes || diff_pixels + 2 * (diff_bytes - best_diff_bytes) < best_diff_pixels)
+			if (match_info.other_px_diff < best_other_px_diff ||
+				(match_info.other_px_diff == best_other_px_diff && match_info.edge_px_diff < best_edge_px_diff))
 			{
 				best_fit = mi;
-				best_diff_bytes = diff_bytes;
-				best_diff_pixels = diff_pixels;
+				best_other_px_diff = match_info.other_px_diff;
+				best_edge_px_diff = match_info.edge_px_diff;
 			}
 		}
 		
